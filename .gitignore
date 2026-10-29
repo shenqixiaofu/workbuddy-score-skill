@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# 自动化执行记录，含个人数据（积分、Buddy 名、推送状态）
+.workbuddy/
+
+# 凭据一律不入库
+checkin-cred.json
+checkin-rt.json
+config.json
+
+# SkillHub 本地安装元数据（含本机路径、安装时间）
+_meta.json
+_skillhub_meta.json

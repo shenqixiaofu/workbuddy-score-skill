@@ -2768,11 +2768,8 @@ def render_brief(report):
             "（差 %d 天）" % rem if rem else "（满勤）")
     lines.append(today)
 
-    # 需要动手的两件事：礼物待领、猫猫到站待领
+    # 待领只看猫猫旅行：claim_button_text 是活动页按钮文案，常年「立即领取」，与是否待领无关
     acts = []
-    claim = ((report.get("claim") or {}).get("claim_button_text") or "")
-    if claim and "已" not in claim:
-        acts.append("礼物可领")
     tr = report.get("travel") or {}
     if tr.get("available"):
         where = tr.get("location_name") or "目的地"

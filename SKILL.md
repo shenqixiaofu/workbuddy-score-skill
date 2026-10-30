@@ -145,6 +145,7 @@ allowed-tools: Bash
 | 关闭系统通知 | 追加 `--no-toast` |
 | 关闭远程推送 | 追加 `--no-push`（桌面通知仍弹） |
 | 指定推送配置 | 追加 `--push-config <路径>`（默认复用消息推送技能 config.json） |
+| 推送完整播报 | 追加 `--push-detail`（默认只推 5 行摘要，完整版在桌面报告与终端里） |
 
 **授权通道（自 3.1.7 起，仅当通道 A 不可用或想切换时用到）**
 
@@ -172,6 +173,7 @@ allowed-tools: Bash
 - `--no-toast`：关闭系统通知。
 - `--no-push`：关闭远程消息推送（桌面系统通知不受影响）。
 - `--push-config <路径>`：指定推送配置文件路径；缺省复用消息推送技能 config.json（或环境变量 `WORKBUDDY_SCORE_PUSH_CONFIG`）。
+- `--push-detail`：推送 `render_human` 完整播报（约 50 行）。缺省只推 `render_brief` 摘要：余额、今日记录、本周进度、待领事项、活动累计，共 5 行。
 - `--channel <auto|local|web|rt>`：强制指定授权通道；缺省 `auto` 自动择优（A 本机登录态 → B 网页会话 → C 长效令牌）。仅在多通道冲突或调试时用。
 - `--probe`：仅探测三通道可用性与推荐通道，打印 JSON 后退出（不取数、不签到）。
 - `--snippet`：生成通道 B 的浏览器授权片段（`templates/auth-snippet.js` 输出 `WBAUTH1:` 授权码），供 `--setup-code` 使用。

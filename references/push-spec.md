@@ -107,7 +107,8 @@ push_send(title, content, content_type="markdown",
 
 ## 5. 与主脚本的集成
 
-- `buddy_station.py` 在非 `--json` 模式、未加 `--no-push` 时，报告构建后自动调用 `push_send`（传入 `render_human(report)` 作为正文）。
-- 新参数：`--no-push`（关闭远程推送，桌面通知仍弹）、`--push-config <路径>`（指定配置）。
+- `buddy_station.py` 在非 `--json` 模式、未加 `--no-push` 时，报告构建后自动调用 `push_send`（传入 `render_brief(report)` 作为正文）。
+- **正文分两版**：`render_brief` 是给推送渠道的 5 行摘要（余额 / 今日记录 / 本周进度 / 待领事项 / 活动累计），`render_human` 是 50 行完整播报，只用于终端与桌面报告。企业微信群机器人只取 `content`、丢弃 `title`，所以摘要首行自带日期。
+- 参数：`--no-push`（关闭远程推送，桌面通知仍弹）、`--push-config <路径>`（指定配置）、`--push-detail`（推送完整版而非摘要）。
 - 推送失败 / 模块缺失均静默降级（写 stderr `[push] ...`），**不影响主结果（查分 / 签到 / 旅行）**。
 - `--json` 模式不触发推送（机器输出）。

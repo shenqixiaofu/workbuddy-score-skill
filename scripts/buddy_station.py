@@ -2738,6 +2738,59 @@ def render_human(report, with_header=True):
     return "\n".join(lines)
 
 
+def render_brief(report):
+    """推送用的精简版：只留手机上扫一眼要看的几行。
+
+    完整播报留在桌面端（render_html）和终端（render_human），
+    推送渠道只发这个，否则企业微信每天一条 50 行、1600 字的短信。
+    """
+    lines = []
+    # 企业微信群机器人只发 content、丢掉 title，日期得自己带，否则一天一条分不清哪天
+    lines.append("**WorkBuddy 每日** · %s" % datetime.now().strftime("%m-%d"))
+    bal = report.get("balance") or {}
+    if bal.get("available"):
+        pool = next((g for g in bal.get("groups") or [] if g.get("kind") == "benefit"), None)
+        cap = " / %s" % _fmt_num(pool.get("total")) if pool and pool.get("total") else ""
+        lines.append("余额 **%s**%s" % (_fmt_num(bal.get("remaining")), cap))
+    else:
+        lines.append("余额 查询失败（其他数据不受影响）")
+
+    if report.get("today_checked_in"):
+        today = "今日 已记录 +%s" % _fmt_num(report.get("today_credit"))
+    else:
+        today = "今日 **未记录**（对话一次 +%s）" % _fmt_num(report.get("daily_credit"))
+
+    done = report.get("week_progress_done")
+    if done is not None:
+        rem = report.get("week_remaining")
+        today += " · 本周 %d/%s%s" % (
+            done, report.get("week_progress_total") or "?",
+            "（差 %d 天）" % rem if rem else "（满勤）")
+    lines.append(today)
+
+    # 需要动手的两件事：礼物待领、猫猫到站待领
+    acts = []
+    claim = ((report.get("claim") or {}).get("claim_button_text") or "")
+    if claim and "已" not in claim:
+        acts.append("礼物可领")
+    tr = report.get("travel") or {}
+    if tr.get("available"):
+        where = tr.get("location_name") or "目的地"
+        if tr.get("state") == "arrived":
+            acts.append("%s 待领 +%s" % (where, _fmt_num(tr.get("reward_credit"))))
+        elif tr.get("state_text"):
+            acts.append("猫猫 %s" % tr["state_text"])
+    if acts:
+        lines.append(" · ".join(acts))
+
+    tail = "活动累计 %s" % _fmt_num(report.get("total_credits"))
+    remain = (report.get("activity") or {}).get("remaining_days")
+    if remain is not None:
+        tail += " · 活动剩 %d 天" % remain
+    lines.append(tail)
+    return "\n".join(lines)
+
+
 def render_checkin(result, report):
     lines = []
     lines.append("== WorkBuddy积分助手 · 自动签到 ==")
@@ -3044,7 +3097,7 @@ def _notify_linux(title, message):
     raise RuntimeError("未找到可用的桌面通知工具（notify-send / kdialog）")
 
 
-def _do_push(report, checkin_result=None, push_config_path=None):
+def _do_push(report, checkin_result=None, push_config_path=None, detail=False):
     """自动把积分播报推送到已配置的远程渠道（配置即自动推送）。失败静默降级。"""
     try:
         from push_notify import push_send, render_results, load_push_config
@@ -3054,12 +3107,13 @@ def _do_push(report, checkin_result=None, push_config_path=None):
     try:
         cfg = load_push_config(push_config_path) if push_config_path else None
         title = "WorkBuddy 积分播报"
-        content = render_human(report)
+        content = render_human(report) if detail else render_brief(report)
         if checkin_result:
             act = checkin_result.get("action")
+            # 精简版只在失败时报警：成功/已签到的信息正文里已经有了
             sign = {"checked_in": "✅ 签到成功", "skipped": "今日已签到",
                     "failed": "❌ 签到失败"}.get(act)
-            if sign:
+            if sign and (detail or act == "failed"):
                 content = sign + "\n\n" + content
         results = push_send(title, content, content_type="markdown", config=cfg, confirm_paid=False)
     except Exception as exc:  # noqa: BLE001
@@ -3179,6 +3233,7 @@ def main():
             except ValueError:
                 sys.stderr.write("[travel] --location 需为整数（1-4），已忽略\n")
     no_push = "--no-push" in args
+    push_detail = "--push-detail" in args
     push_config_path = _arg_value(args, "--push-config")
 
     # ---- 只读探测 / 一次性配置（不改任何登录态）----
@@ -3277,7 +3332,7 @@ def main():
             t = build_toast_content(report, result)
             notify(t[0], t[1])
         if not no_push:
-            _do_push(report, result, push_config_path)
+            _do_push(report, result, push_config_path, push_detail)
         return 0 if result.get("action") != "failed" else 1
 
     status, body = api_call(domain, token, CHECKIN_STATUS_PATH)
@@ -3303,7 +3358,7 @@ def main():
             t = build_toast_content(report, None)
             notify(t[0], t[1])
         if not no_push:
-            _do_push(report, None, push_config_path)
+            _do_push(report, None, push_config_path, push_detail)
     return 0
 
 

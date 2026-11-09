@@ -16,11 +16,13 @@ Windows 用同目录 toast.ps1、macOS 用 osascript、Linux 用 notify-send，�
 钉钉 / 飞书 / 企业微信 / 邮件等（--no-push 可整体关闭，--push-config 可指定配置文件）。
 桌面 HTML 报告默认**不**生成，需显式加 `--html` 才会写到桌面 `WorkBuddy积分播报.html`；
 这样在对话里可以先看文字播报、再按需询问用户是否要生成 HTML 报告。两者任一失败均静默降级，不影响主结果。
-安全约束：只读登录态、绝不打印或外传 accessToken；自动签到仅调用 daily-checkin 这一授权写接口，
-绝不调用兑换 / 抽奖等其他写接口；除向桌面写入报告 HTML 与调用系统通知外，不修改或删除任何文件。
+安全约束：只读登录态、绝不打印或外传 accessToken；写接口仅四类，且全部需显式开关：
+签到（checkin）、旅行领取 / 派出（--travel-auto）、开盲盒（--box-auto）。
+抽奖与分档兑换的请求体未确认（服务端要求页面侧签名参数），脚本只读展示、不发写请求。
+除向桌面写入报告 HTML 与调用系统通知外，不修改或删除任何文件。
 
-注意：STREAK_TIERS 与 Buddy 加油站官方页面节点一致（7 / 14 / 28 天），
-14 天节点奖励为脚本推断（截图仅截到 7 / 28 的 tooltip），待用户或官方校准。
+注意：STREAK_TIERS 已按服务端 `/activity/growth/streak` 的 tiers 实测值校准，
+与页面「选择奖励」弹窗一致（入门档 +2 能量、进阶档 +50 积分 +3 能量、巅峰档 +150 积分 +5 能量）。
 """
 
 from __future__ import annotations
@@ -73,6 +75,11 @@ TRAVEL_CONFIG_PATH = "/activity/growth/buddy/travel/config"     # GET  地点配
 TRAVEL_RECORDS_PATH = "/activity/growth/buddy/travel/records"   # GET  旅行历史
 GROWTH_ENERGY_PATH = "/activity/growth/energy"                  # GET  能量余额
 BUDDY_QUOTA_PATH = "/activity/growth/buddy/quota"               # GET  Buddy 开启配额
+GROWTH_STREAK_PATH = "/activity/growth/streak"                  # GET  连续登录 / 分档兑换 / 补登卡
+GROWTH_LOTTERY_CHANCES_PATH = "/activity/growth/lottery/chances"  # GET  抽奖次数
+BUDDY_OPEN_PATH = "/activity/growth/buddy/open"                 # POST 开盲盒（消耗能量）
+# 抽奖 POST /activity/growth/lottery/draw 与兑换 POST /activity/growth/redeem 路由存在，
+# 但请求体必填字段未探明（各种命名都回 invalid request），未接入，别拿猜的 body 去写。
 
 # 旅行状态中文映射
 TRAVEL_STATE_TEXT = {
@@ -81,16 +88,13 @@ TRAVEL_STATE_TEXT = {
     "arrived": "已到达（待领取）",
 }
 
-# ===== 连续奖励分档（与 Buddy加油站 官方页面节点一致：7 / 14 / 28 天）=====
-# 字段来源：
-#   7天  = +50积分 +3能量 +1张补登卡 +1次抽奖（截图 tooltip 可见）
-#   14天 = +100积分 +4能量 +1张补登卡 +1次抽奖（脚本推断，截图未截到 tooltip）
-#   28天 = +150积分 +5能量 +1张补登卡 +1次抽奖（截图 tooltip 可见）
-# 奖励类型：累计发放（达到即自动到账，参考 7 / 14 节点）/ 主动兑换（28 天节点有「兑换奖励」按钮）
+# ===== 连续奖励分档（7 / 14 / 28 天，数值取自服务端 `/activity/growth/streak` 的 tiers）=====
+# 页面「选择奖励」弹窗实测：入门档 +2 能量、进阶档 +50 积分 +3 能量、巅峰档 +150 积分 +5 能量，
+# 三档都带 +1 补登卡 +1 次抽奖，且都是手动「兑换」（入门档已兑换后显示「已兑换」）。
 STREAK_TIERS = [
-    {"streak_days": 7,  "credit": 50,  "energy": 3, "makeup_card": 1, "lottery": 1, "type": "累计发放", "note": "官方页面 tooltip"},
-    {"streak_days": 14, "credit": 100, "energy": 4, "makeup_card": 1, "lottery": 1, "type": "累计发放", "note": "脚本推断·待校准"},
-    {"streak_days": 28, "credit": 150, "energy": 5, "makeup_card": 1, "lottery": 1, "type": "主动兑换", "note": "官方页面 tooltip"},
+    {"streak_days": 7,  "credit": 0,   "energy": 2, "makeup_card": 1, "lottery": 1, "type": "主动兑换", "note": "服务端 tiers"},
+    {"streak_days": 14, "credit": 50,  "energy": 3, "makeup_card": 1, "lottery": 1, "type": "主动兑换", "note": "服务端 tiers"},
+    {"streak_days": 28, "credit": 150, "energy": 5, "makeup_card": 1, "lottery": 1, "type": "主动兑换", "note": "服务端 tiers"},
 ]
 
 DESKTOP_REPORT_NAME = "WorkBuddy积分播报.html"
@@ -2500,6 +2504,157 @@ def collect_travel(token, travel_auto_on=False, location_id=None):
     return raw, auto_log
 
 
+def fetch_growth_center(token, travel_raw=None):
+    """成长中心只读数据：连续登录 / 分档兑换、补登卡、抽奖次数、能量与盲盒配额。
+
+    能量与配额复用旅行区块已取到的结果，避免同一轮重复请求。
+    """
+    src = travel_raw if isinstance(travel_raw, dict) else {}
+    return {
+        "streak": _travel_get(token, GROWTH_STREAK_PATH),
+        "chances": _travel_get(token, GROWTH_LOTTERY_CHANCES_PATH),
+        "energy": src.get("energy") if src else _travel_get(token, GROWTH_ENERGY_PATH),
+        "quota": src.get("quota") if src else _travel_get(token, BUDDY_QUOTA_PATH),
+    }
+
+
+def parse_growth_center(raw):
+    """规整成长中心数据；字段缺失填 None，绝不编造。"""
+    if not isinstance(raw, dict):
+        return {"available": False}
+    streak = raw.get("streak") if isinstance(raw.get("streak"), dict) else None
+    chances = raw.get("chances") if isinstance(raw.get("chances"), dict) else None
+    energy = raw.get("energy") if isinstance(raw.get("energy"), dict) else None
+    quota = raw.get("quota") if isinstance(raw.get("quota"), dict) else None
+
+    st = (streak or {}).get("streak") or {}
+    cards = (streak or {}).get("makeup_cards") or {}
+    red = (streak or {}).get("redemption_status") or {}
+    tiers = []
+    for t in red.get("tiers") or []:
+        if isinstance(t, dict):
+            tiers.append({
+                "tier": t.get("tier"),
+                "days": t.get("days"),
+                "credit": t.get("credit"),
+                "energy": t.get("energy"),
+                "cards": t.get("cards"),
+                "chances": t.get("chances"),
+            })
+    return {
+        "available": any(x is not None for x in (streak, chances, energy, quota)),
+        "streak_days": st.get("days"),
+        "next_tier": st.get("next_tier"),
+        "next_tier_remaining": st.get("next_tier_remaining"),
+        "makeup_dates": st.get("makeup_dates") or [],
+        "makeup_cards": cards.get("balance"),
+        "makeup_cards_max": cards.get("max"),
+        "redemption": {
+            "7d": red.get("tier_7d_status"),
+            "14d": red.get("tier_14d_status"),
+            "28d": red.get("tier_28d_status"),
+            "remaining_days": red.get("remaining_days"),
+            "tiers": tiers,
+        },
+        "lottery_chances": (chances or {}).get("balance"),
+        "energy": (energy or {}).get("balance"),
+        "energy_earned": (energy or {}).get("total_earned"),
+        "energy_consumed": (energy or {}).get("total_consumed"),
+        "box_cost": (quota or {}).get("cost_per_open"),
+        "box_affordable": (quota or {}).get("affordable"),
+        "box_max_open": (quota or {}).get("max_open_count"),
+    }
+
+
+def _box_result_text(data):
+    """盲盒返回结构未公开：宽松找带 name + rarity/tier 的 Buddy 对象，找不到就报通用文案。"""
+    def find(node):
+        if isinstance(node, dict):
+            if node.get("name") and (node.get("rarity") or node.get("tier")):
+                return node
+            for v in node.values():
+                hit = find(v)
+                if hit:
+                    return hit
+        elif isinstance(node, list):
+            for v in node:
+                hit = find(v)
+                if hit:
+                    return hit
+        return None
+
+    b = find(data)
+    if b:
+        return "🎁 开出 %s（%s）" % (b.get("name"), b.get("rarity") or b.get("tier"))
+    return "🎁 开出一只 Buddy"
+
+
+def box_auto(token):
+    """开盲盒（写操作）：按配额与能量逐个开，开不动就停。
+
+    安全约束：先查 quota，affordable <= 0 时不发任何写请求；单次最多开 max_open_count 个。
+    """
+    log = []
+    quota = _travel_get(token, BUDDY_QUOTA_PATH) or {}
+    energy = _travel_get(token, GROWTH_ENERGY_PATH) or {}
+    cost = quota.get("cost_per_open")
+    affordable = quota.get("affordable")
+    balance = energy.get("balance")
+    max_open = quota.get("max_open_count")
+
+    if not isinstance(affordable, int):
+        if isinstance(balance, int) and isinstance(cost, int) and cost > 0:
+            affordable = balance // cost
+        else:
+            log.append("未能获取盲盒配额，已跳过")
+            return {"success": False, "opened": 0, "log": log}
+    if isinstance(max_open, int) and max_open > 0:
+        affordable = min(affordable, max_open)
+    if affordable <= 0:
+        log.append("能量不足，跳过开盲盒（能量 %s，单次 %s）" % (
+            balance if balance is not None else "?", cost if cost is not None else "?"))
+        return {"success": True, "opened": 0, "log": log}
+
+    opened = 0
+    for _ in range(affordable):
+        try:
+            st, body = api_call(TRAVEL_DOMAIN, token, BUDDY_OPEN_PATH, method="POST", payload={})
+        except Exception as exc:  # noqa: BLE001
+            log.append("开盲盒异常：%s" % exc)
+            break
+        if st == 200 and isinstance(body, dict) and body.get("code") == 0:
+            opened += 1
+            log.append(_box_result_text(body.get("data") or {}))
+            continue
+        msg = (body.get("msg") if isinstance(body, dict) else None) or ("HTTP %s" % st)
+        log.append("开盲盒停止：%s" % msg)
+        break
+    if opened > 1:
+        log.append("本次共开 %d 次盲盒" % opened)
+    return {"success": True, "opened": opened, "log": log}
+
+
+def collect_growth_center(token, travel_raw, box_auto_on=False):
+    """收集成长中心数据；box_auto_on 为真时先开盲盒，再刷新能量与配额。
+
+    返回 (原始只读数据, 自动执行日志或 None)。
+    """
+    raw = fetch_growth_center(token, travel_raw)
+    auto_log = None
+    if box_auto_on:
+        result = box_auto(token)
+        auto_log = result.get("log") or []
+        if result.get("opened"):
+            fresh_energy = _travel_get(token, GROWTH_ENERGY_PATH)
+            fresh_quota = _travel_get(token, BUDDY_QUOTA_PATH)
+            raw["energy"] = fresh_energy
+            raw["quota"] = fresh_quota
+            if isinstance(travel_raw, dict):
+                travel_raw["energy"] = fresh_energy
+                travel_raw["quota"] = fresh_quota
+    return raw, auto_log
+
+
 def streak_tier_schedule(streak_days):
     upcoming = []
     for tier in STREAK_TIERS:
@@ -2516,7 +2671,7 @@ def streak_tier_schedule(streak_days):
     return upcoming
 
 
-def build_report(data, growth=None, travel=None):
+def build_report(data, growth=None, travel=None, growth_center=None):
     today = date.today()
     checkin_dates = data.get("checkin_dates") or []
     this_month = [d for d in checkin_dates if d.startswith(today.strftime("%Y-%m"))]
@@ -2584,6 +2739,7 @@ def build_report(data, growth=None, travel=None):
         },
         "remind_checkin": (not data.get("today_checked_in")),
         "growth": parse_growth(growth),
+        "growth_center": parse_growth_center(growth_center),
         "travel": parse_travel(travel),
     }
     return report
@@ -2645,9 +2801,9 @@ def render_human(report, with_header=True):
         else:
             streak_tip += "；已达连续奖励节点 %d 天" % nxt
     if bonus_credit is not None:
-        streak_tip += "；连续奖励累计 %s 分（%s 天）" % (bonus_credit, bonus_days if bonus_days is not None else "?")
+        streak_tip += "；连续奖励记录 %s 分（%s 天）" % (bonus_credit, bonus_days if bonus_days is not None else "?")
     if streak_tip:
-        lines.append("连续登录：" + streak_tip.lstrip("；"))
+        lines.append("签到活动累计：" + streak_tip.lstrip("；"))
 
     sched = report.get("streak_schedule") or []
     if sched:
@@ -2659,7 +2815,7 @@ def render_human(report, with_header=True):
             return base
         full = " / ".join(fmt(t) for t in STREAK_TIERS)
         first = sched[0]
-        lines.append("连续奖励分档（与官方页面一致）：%s" % full)
+        lines.append("连续奖励分档（服务端 tiers）：%s" % full)
         lines.append("  下一档：%d 天（还差 %d 天）" % (first["streak_days"], first["remaining"]))
 
     act = report["activity"]
@@ -2707,6 +2863,48 @@ def render_human(report, with_header=True):
                     t.get("title"), rc if rc is not None else "?",
                     (" · %s" % st) if st else ""))
 
+    gc = report.get("growth_center") or {}
+    if gc.get("available"):
+        lines.append("")
+        lines.append("成长中心：")
+        if gc.get("streak_days") is not None:
+            stxt = "  连续登录：%s 天" % gc["streak_days"]
+            if gc.get("next_tier"):
+                stxt += "（下一档 %s，还差 %s 天）" % (
+                    gc["next_tier"],
+                    gc.get("next_tier_remaining") if gc.get("next_tier_remaining") is not None else "?")
+            lines.append(stxt)
+        red = gc.get("redemption") or {}
+        if red.get("tiers"):
+            label_map = {"claimed": "已兑换", "locked": "未解锁",
+                         "available": "可兑换", "redeemable": "可兑换", "pending": "可兑换"}
+            parts = []
+            for t in red["tiers"]:
+                status = red.get(t.get("tier")) or "?"
+                parts.append("%s（%s 天）%s" % (
+                    t.get("tier"), t.get("days"), label_map.get(status, status)))
+            lines.append("  分档兑换：%s" % " · ".join(parts))
+        if gc.get("makeup_cards") is not None:
+            lines.append("  补登卡：%s 张（上限 %s 张）" % (
+                gc["makeup_cards"], gc.get("makeup_cards_max") if gc.get("makeup_cards_max") is not None else "?"))
+        if gc.get("lottery_chances") is not None:
+            lines.append("  抽奖次数：%s 次" % gc["lottery_chances"])
+        if gc.get("energy") is not None:
+            etxt = "  能量：%s" % gc["energy"]
+            if gc.get("energy_earned") is not None or gc.get("energy_consumed") is not None:
+                etxt += "（累计获得 %s / 消耗 %s）" % (
+                    gc.get("energy_earned") if gc.get("energy_earned") is not None else "?",
+                    gc.get("energy_consumed") if gc.get("energy_consumed") is not None else "?")
+            lines.append(etxt)
+        if gc.get("box_cost") is not None:
+            lines.append("  盲盒：%s 能量/次，当前可开 %s 次" % (
+                gc["box_cost"], gc.get("box_affordable") if gc.get("box_affordable") is not None else "?"))
+        glog = gc.get("auto_log") or []
+        if glog:
+            lines.append("  自动执行：")
+            for item in glog:
+                lines.append("    · %s" % item)
+
     tr = report.get("travel") or {}
     if tr.get("available"):
         lines.append("")
@@ -2734,7 +2932,7 @@ def render_human(report, with_header=True):
                 lines.append("    · %s" % item)
 
     lines.append("")
-    lines.append("暂不支持：积分明细（流水）、兑换 / 抽奖条件——成长计划任务 / 进度 / 当前 Buddy 与派猫猫旅行均已通过只读 GET 接口展示；积分明细与兑换抽奖仍无可用只读接口，本助手只做已验证字段的只读查询，不编造上述数据。")
+    lines.append("暂不支持：积分明细（流水）。成长中心的连续登录、分档兑换状态、补登卡、抽奖次数、能量与盲盒配额均已接入只读展示；抽奖与分档兑换的请求体未确认，只展示不代操作，开盲盒仅在显式加 --box-auto 时执行。")
     return "\n".join(lines)
 
 
@@ -2779,6 +2977,10 @@ def render_brief(report):
             acts.append("猫猫 %s" % tr["state_text"])
     if acts:
         lines.append(" · ".join(acts))
+
+    glog = (report.get("growth_center") or {}).get("auto_log") or []
+    if glog:
+        lines.append("盲盒 " + glog[-1])
 
     tail = "活动累计 %s" % _fmt_num(report.get("total_credits"))
     remain = (report.get("activity") or {}).get("remaining_days")
@@ -2932,6 +3134,50 @@ def render_html(report, checkin_result=None):
         if tparts:
             travel_block = "<div class='card'><b>派猫猫旅行</b><br>" + "<br>".join(tparts) + "</div>"
 
+    gc = r.get("growth_center") or {}
+    growth_center_block = ""
+    if gc.get("available"):
+        cparts = []
+        if gc.get("streak_days") is not None:
+            stxt = "连续登录：%s 天" % _esc(gc["streak_days"])
+            if gc.get("next_tier"):
+                stxt += "（下一档 %s，还差 %s 天）" % (
+                    _esc(gc["next_tier"]),
+                    _esc(gc.get("next_tier_remaining") if gc.get("next_tier_remaining") is not None else "?"))
+            cparts.append(stxt)
+        red = gc.get("redemption") or {}
+        if red.get("tiers"):
+            label_map = {"claimed": "已兑换", "locked": "未解锁",
+                         "available": "可兑换", "redeemable": "可兑换", "pending": "可兑换"}
+            bits = []
+            for t in red["tiers"]:
+                status = red.get(t.get("tier")) or "?"
+                bits.append("%s（%s 天）%s" % (
+                    _esc(t.get("tier")), _esc(t.get("days")), _esc(label_map.get(status, status))))
+            cparts.append("分档兑换：" + " · ".join(bits))
+        if gc.get("makeup_cards") is not None:
+            cparts.append("补登卡：%s 张（上限 %s 张）" % (
+                _esc(gc["makeup_cards"]),
+                _esc(gc.get("makeup_cards_max") if gc.get("makeup_cards_max") is not None else "?")))
+        if gc.get("lottery_chances") is not None:
+            cparts.append("抽奖次数：%s 次" % _esc(gc["lottery_chances"]))
+        if gc.get("energy") is not None:
+            etxt = "能量：%s" % _esc(gc["energy"])
+            if gc.get("energy_earned") is not None or gc.get("energy_consumed") is not None:
+                etxt += "（累计获得 %s / 消耗 %s）" % (
+                    _esc(gc.get("energy_earned") if gc.get("energy_earned") is not None else "?"),
+                    _esc(gc.get("energy_consumed") if gc.get("energy_consumed") is not None else "?"))
+            cparts.append(etxt)
+        if gc.get("box_cost") is not None:
+            cparts.append("盲盒：%s 能量/次，当前可开 %s 次" % (
+                _esc(gc["box_cost"]),
+                _esc(gc.get("box_affordable") if gc.get("box_affordable") is not None else "?")))
+        glog = gc.get("auto_log") or []
+        if glog:
+            cparts.append("自动执行：<br>" + "<br>".join(_esc(x) for x in glog))
+        if cparts:
+            growth_center_block = "<div class='card'><b>成长中心</b><br>" + "<br>".join(cparts) + "</div>"
+
     remind = ""
     if r.get("remind_checkin"):
         remind = ("<div class='card warn-card'>⏰ <b>记录催办</b>：今日尚未完成对话，"
@@ -2987,20 +3233,21 @@ def render_html(report, checkin_result=None):
   %s
   %s
   %s
-  <div class="card"><b>连续奖励分档</b>（与官方页面一致 7/14/28 节点）</div>
+  %s
+  <div class="card"><b>连续奖励分档</b>（服务端 tiers 7/14/28 节点）</div>
   <table>
     <tr><th>节点</th><th>积分</th><th>能量</th><th>补登卡</th><th>抽奖</th><th>类型</th><th>状态</th></tr>
     %s
   </table>
   %s
   %s
-  <div class="foot">暂不支持：积分明细（流水）、兑换/抽奖条件——成长计划任务/进度/当前 Buddy 与派猫猫旅行均已通过只读 GET 接口展示；积分明细与兑换抽奖仍无可用只读接口。本助手仅做已验证字段的只读查询与本地展示，不编造数据。<br>版本 2.1.0 · 派猫猫旅行的「领取 / 派出」仅在显式加 --travel-auto 时执行，且派出前必查每日上限；除签到与旅行外不调用其他写接口。</div>
+  <div class="foot">暂不支持：积分明细（流水）。成长中心的连续登录、分档兑换状态、补登卡、抽奖次数、能量与盲盒配额均已接入只读展示；抽奖与分档兑换的请求体未确认，只展示不代操作。<br>版本 3.2.0 · 写操作仅限签到、旅行领取/派出（--travel-auto）与开盲盒（--box-auto），全部需显式开关。</div>
 </div>
 </body>
 </html>
 """ % (
         _esc(ts), _esc(bal_txt), _esc(r.get("total_credits")), _esc(streak_days), today_cls, today_txt,
-        checkin_block, month_block, weekly, act_block, growth_block, travel_block,
+        checkin_block, month_block, weekly, act_block, growth_block, travel_block, growth_center_block,
         tier_table, remind, claim_block,
     )
     return html
@@ -3220,6 +3467,7 @@ def main():
     gen_html = "--html" in args
     no_toast = "--no-toast" in args
     travel_auto_on = "--travel-auto" in args
+    box_auto_on = "--box-auto" in args
     channel = _arg_value(args, "--channel") or "auto"
     # --location N：指定派遣地点（1-4，对应咖啡馆/商场店铺/健身房/古镇客栈），缺省随机
     location_id = None
@@ -3311,12 +3559,16 @@ def main():
             return 1
         growth = fetch_growth(domain, token)
         travel_raw, auto_log = collect_travel(token, travel_auto_on, location_id)
-        report = build_report(data, growth, travel_raw)
+        growth_center_raw, box_log = collect_growth_center(token, travel_raw, box_auto_on)
+        report = build_report(data, growth, travel_raw, growth_center_raw)
         report["balance"] = fetch_balance(domain, token)
         if auto_log:
             report.setdefault("travel", {})
             report["travel"]["auto_log"] = auto_log
             report["travel"]["available"] = True
+        if box_log:
+            report.setdefault("growth_center", {})
+            report["growth_center"]["auto_log"] = box_log
         if as_json:
             out = report
             out["checkin_result"] = result
@@ -3339,12 +3591,16 @@ def main():
     data = body.get("data", {})
     growth = fetch_growth(domain, token)
     travel_raw, auto_log = collect_travel(token, travel_auto_on, location_id)
-    report = build_report(data, growth, travel_raw)
+    growth_center_raw, box_log = collect_growth_center(token, travel_raw, box_auto_on)
+    report = build_report(data, growth, travel_raw, growth_center_raw)
     report["balance"] = fetch_balance(domain, token)
     if auto_log:
         report.setdefault("travel", {})
         report["travel"]["auto_log"] = auto_log
         report["travel"]["available"] = True
+    if box_log:
+        report.setdefault("growth_center", {})
+        report["growth_center"]["auto_log"] = box_log
     if as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

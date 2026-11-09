@@ -47,7 +47,7 @@ Content-Type: application/json
 | GET | `/v2/activity/growth/buddy/info` | 当前 Buddy（只读） | `data.buddy`：`name` / `rarity` | 无需 Turing Shield 设备指纹 |
 | POST | `/v2/billing/meter/daily-checkin` | 自动签到（写） | `code 0` 成功 / `code 10001`「今天已签到」 | 幂等，已验证 |
 
-派猫猫旅行接口族见**第 6 节**（域名与路径规则不同，单独列出）。
+派猫猫旅行接口族见**第 6 节**（域名与路径规则不同，单独列出）；成长中心（连续登录 / 抽奖次数 / 盲盒）见 **6.8**。
 
 返回结构统一为 `{code:0, data:...}`（GET 成长接口）或 `{code, msg, data}`（状态 / 签到）。非 200 / 非 0 码按错误处理。
 
@@ -181,16 +181,35 @@ POST /activity/growth/buddy/travel/claim
 
 ---
 
-## 7. 连续奖励分档（`STREAK_TIERS`，与官方页面节点一致）
+### 6.8 成长中心（同一接口族，`/activity/growth/...`）
+
+| 方法 | 路径 | 用途 | 关键返回字段 |
+|---|---|---|---|
+| GET | `/activity/growth/streak` | 连续登录 / 分档兑换 / 补登卡（只读） | `streak{days, month_total_days, next_tier, next_tier_remaining, makeup_dates}`、`makeup_cards{balance,max}`、`redemption_status{tier_7d_status, tier_14d_status, tier_28d_status, remaining_days, tiers[]}` |
+| GET | `/activity/growth/lottery/chances` | 抽奖次数余额（只读） | `balance` |
+| GET | `/activity/growth/lottery/prizes` | 奖池与概率（只读） | `prizes[]{prize_code, prize_name, prize_type, credit_amount, probability_pct}` |
+| GET | `/activity/growth/buddy/list` | 已拥有 Buddy 图鉴（只读） | `buddies[]{name, rarity, source, acquired_at, current_buddy}`、`count` |
+| POST | `/activity/growth/buddy/open` | **开盲盒（写）** | body `{}`；每次消耗 `quota.cost_per_open` 能量 |
+| POST | `/activity/growth/lottery/draw` | 抽奖（**未接入**） | 路由存在，请求体必填字段未探明 |
+| POST | `/activity/growth/redeem` | 分档兑换（**未接入**） | 路由存在，请求体必填字段未探明 |
+| POST | `/activity/growth/makeup-cards/use` | 用补登卡（**未接入**） | 路由存在，请求体必填字段未探明 |
+| POST | `/activity/growth/buddy/switch` | 切换当前 Buddy（**未接入**） | 路由存在，请求体必填字段未探明 |
+
+- 三个「未接入」写接口的判定方法：GET 一律 404（POST-only 路由对 GET 也回 404），但 `POST` + 非法 JSON 体会回 400（路由存在），换合法 body 则统一回 `invalid request` —— 说明还有必填字段没猜中，疑似需要页面侧签名参数。别拿猜的 body 去试。
+- 分档奖励以 `/activity/growth/streak` 的 `redemption_status.tiers[]` 为准：`credit` / `energy` / `cards` / `chances`。7 天档可能只给能量与卡、不给积分（本机实测 `credit=0`）。
+
+---
+
+## 7. 连续奖励分档（`STREAK_TIERS`，2026-11-09 按服务端 tiers 校准）
 
 | 节点 | 积分 | 能量 | 补登卡 | 抽奖 | 类型 | 来源 |
 |---|---|---|---|---|---|---|
-| 7 天 | +50 | +3 | +1 | +1 | 累计发放 | 官方页面 tooltip ✓ |
-| 14 天 | +100 | +4 | +1 | +1 | 累计发放 | 脚本推断·待校准 ⚠️ |
-| 28 天 | +150 | +5 | +1 | +1 | 主动兑换 | 官方页面 tooltip ✓ |
+| 7 天 | 0 | +2 | +1 | +1 | 主动兑换 | 服务端 tiers 实测 ✓ |
+| 14 天 | +50 | +3 | +1 | +1 | 主动兑换 | 服务端 tiers 实测 ✓ |
+| 28 天 | +150 | +5 | +1 | +1 | 主动兑换 | 服务端 tiers 实测 ✓ |
 
 - 接口仅返回「下一次连续奖励节点天数」`next_streak_day` 与「连续奖励累计积分」`streak_bonus_credit`；分档表为脚本内置映射，用于本地化呈现各档奖励与下一档缺口。
-- **14 天节点为脚本推断**（截图未截到 tooltip）。有官方数值发我，直接改 `STREAK_TIERS`（仅改数据，不动逻辑）。
+- 三档都是手动「兑换」（页面「选择奖励」弹窗），已兑换的档位按钮变「已兑换」。
 
 ---
 
@@ -221,12 +240,14 @@ POST /activity/growth/buddy/travel/claim
 ## 10. 安全约束（硬规则）
 
 - 只读登录态文件，绝不修改 / 删除 / 外传 `accessToken` / `refreshToken`；任何输出不含真实 token。
-- **写操作仅允许三个已验证接口**：
+- **写操作仅允许四个已验证接口**：
   1. `POST /v2/billing/meter/daily-checkin`（签到，幂等）
   2. `POST /activity/growth/buddy/travel/claim`（领取旅行奖励）
   3. `POST /activity/growth/buddy/travel/depart`（派出 Buddy 旅行）
+  4. `POST /activity/growth/buddy/open`（开盲盒，body `{}`，需 `--box-auto`）
 - 旅行写操作**必须**显式加 `--travel-auto` 才执行；派出前必查 `daily_limit_reached`，达上限跳过。
-- 绝不调用兑换 / 抽奖等其他写接口。
+- 盲盒写操作**必须**显式加 `--box-auto` 才执行；开之前必查 `quota.affordable`，为 0 时跳过。
+- 绝不调用抽奖 / 分档兑换 / 补登卡 / 换 Buddy 等请求体未验证的写接口。
 - 桌面展示仅写 `~/Desktop/WorkBuddy积分播报.html` 与弹系统通知；不修改 / 删除其他文件。
 - 定时任务用 WorkBuddy 自带自动化（recurring），无需 crontab / launchd。
 

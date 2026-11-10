@@ -6,7 +6,7 @@ description: "WorkBuddy积分助手（WorkBuddy积分查询、获取、播报 Sk
 description_zh: "WorkBuddy积分助手：读取本机登录态，接口直查 Buddy 加油站数据生成每日积分播报；只读展示成长计划、成长中心（连续登录档位 / 分档兑换状态 / 补登卡 / 抽奖次数 / 能量 / 盲盒配额）与派猫猫旅行状态，支持一键幂等自动签到、旅行全自动闭环（先领后派，需显式 --travel-auto）与自动开盲盒（需显式 --box-auto），并可把播报推送至自有渠道（12 渠道，复用消息推送技能配置，--no-push 可关）。提供三通道授权：A 本机登录态（零配置，典型 Windows）、B 一次性网页会话授权（macOS/Linux 等无法本地解密时）、C 长效令牌自续期（客户端可不开）。跨平台 Windows/macOS/Linux；以只读为主，写操作仅限签到、旅行领取/派出与开盲盒，不打印 token，不修改登录态。兼容 WorkBuddy 5.6.2+ 客户端：登录态 accessToken 为 AES-256-GCM 信封，自动识别并解密。"
 description_en: "WorkBuddy Credit Assistant queries Buddy Station via API for a daily credit report (balance, streak, calendar, weekly progress, event, streak rewards), shows the read-only growth plan and growth center (streak tiers, redemption status, makeup cards, lottery chances, energy, blind-box quota) plus Buddy travel status, supports one-click idempotent auto check-in, a fully automated travel loop (claim first, then depart; needs explicit --travel-auto) and auto blind-box opening (needs explicit --box-auto), and pushes the report to 12 channels mirroring totorosir-push-message (disable with --no-push). Three channels are chosen automatically: a usable local login state (typically Windows) needs zero config; if it cannot be decrypted (typically macOS), a one-time ~30s web-session authorization applies; or save a long-lived refresh token once for self-renewal that works even with the client closed. Cross-platform Windows/macOS/Linux. Read-only by default; write calls limited to check-in, travel claim/depart and blind-box open; never prints the token. Compatible with WorkBuddy 5.6.2+: the accessToken became an AES-256-GCM envelope, auto-detected and decrypted."
 category: automation
-version: 3.2.0
+version: 3.2.1
 author: totorosir
 agent_created: true
 visibility: public
@@ -70,17 +70,23 @@ allowed-tools: Bash
 执行命令：
 {PYTHON} {SCRIPT} checkin --travel-auto --box-auto
 
+汇报格式（只报事实，不报分析）：
+- 签到结果（成功 / 今日已签到 / 失败原因）
+- 账户积分余额（唯一积分口径，含套餐基础/平台奖励拆分；查询失败就写失败，禁止用活动累计冒充余额）
+- 今日是否已记录、本周进度
+- 派猫猫旅行日志：领了多少、派到哪、今日是否已达上限（直接陈述）
+- 成长中心：连续登录天数与下一档缺口、分档兑换状态、补登卡、抽奖次数、能量与盲盒配额、开盲盒结果（开出报名字与稀有度；跳过就写跳过）
+- 不报：活动累计积分、成长计划（等级/当前 Buddy/任务清单）、两套口径的解释或对比、变化推测、「不变」类通报、余额波动分析。只有真异常（推送失败、认证失效等）才标注。
+
 要点：
 1. 脚本会自动把播报推送到用户配置的渠道（读 ~/.workbuddy/totorosir-push-message/config.json），并弹桌面系统通知。stdout 中 `[push] 推送结果：` 一段为推送结果，非 errcode 0 时如实汇报错误。
-2. 播报里有两套积分口径，汇报时不要混：「账户积分余额」是账户真实可用余额；「活动累计积分」是活动期间累计发放（=累计记录天数 × 每日积分），不代表账户余额。余额显示「查询失败」时如实报告，不得用活动累计冒充余额。
-3. 汇报重点：签到结果、账户积分余额、活动累计积分、今日是否已记录、连续登录天数、本周进度、成长计划等级、旅行的领/派执行日志（领了多少、派到哪、是否因达上限跳过）、成长中心（连续登录与下一档缺口、分档兑换状态、补登卡、抽奖次数、能量与盲盒配额、开盲盒日志）。
-4. 成长中心的「连续登录」与播报上方的「签到活动累计」是两套口径：前者来自 /activity/growth/streak，后者是 checkin-activity-status 的 streak_days（活动累计签到天数），不要互相印证。
-5. 签到返回 code 10001 /「今天已签到」是正常幂等返回，汇报为「今日已签到」，不是失败。
-6. 认证失败（HTTP 401/403 或提示登录态失效）时如实报告并提示用户重新登录，绝不伪造数据。
-7. 旅行显示「今日派遣：已达上限」是服务端每日限制，正常，不是错误。
-8. 开盲盒提示「能量不足，跳过开盲盒」是正常资源限制（每次 10 能量），不是错误；开出 Buddy 时汇报名字与稀有度。
-9. 抽奖与分档兑换只读展示、不代操作，不要尝试调用这两个接口。
-10. 不要打印或回读 webhook、token 等凭据。
+2. 「账户积分余额」= 账户真实可用余额（来自 /billing/meter/get-user-resource-summary），括号里是平台奖励池总额。播报里的「活动累计积分」（= 累计记录天数 × 每日积分）不代表账户余额，不进汇报。
+3. 成长中心的「连续登录」与播报上方的「签到活动累计」是两套口径：前者来自 /activity/growth/streak，是成长中心当前连续天数；后者是 checkin-activity-status 的 streak_days（活动累计签到天数）。不要互相印证，也不要把 streak_bonus 的 0 说成「没连续」。
+4. 签到返回 code 10001 /「今天已签到」是正常幂等返回，汇报为「今日已签到」，不是失败。
+5. 认证失败（HTTP 401/403 或提示登录态失效）时如实报告并提示用户重新登录，绝不伪造数据。
+6. 旅行「今日派遣：已达上限」是服务端每日限制；开盲盒「能量不足，跳过开盲盒」是资源限制（每次 10 能量）——两者都不是错误，直接陈述即可；开出 Buddy 时汇报名字与稀有度。
+7. 抽奖与分档兑换只读展示、不代操作，不要尝试调用这两个接口。
+8. 不要打印或回读 webhook、token 等凭据。
 ```
 
 ### 幂等与容错
@@ -339,7 +345,8 @@ allowed-tools: Bash
 
 ## 十二、版本说明
 
-- 当前版本号：**3.2.0**。版本号遵循语义化版本规则 MAJOR.MINOR.PATCH；后续迭代请递增对应位（新增能力升 MINOR、缺陷修复升 PATCH、不兼容变更升 MAJOR），并同步修改本文件顶部 `version` 字段。
+- 当前版本号：**3.2.1**。版本号遵循语义化版本规则 MAJOR.MINOR.PATCH；后续迭代请递增对应位（新增能力升 MINOR、缺陷修复升 PATCH、不兼容变更升 MAJOR），并同步修改本文件顶部 `version` 字段。
+- **3.2.1（2026-11-10 汇报格式精简）**：按用户定稿精简对话汇报口径——只报事实、不报分析：积分只留「账户积分余额」一个口径（不再报活动累计积分、不做两口径对比）；成长计划（等级/当前 Buddy/任务清单）不再进汇报；砍掉口径解释、变化推测、「不变」类通报与余额波动分析；「已达上限」「能量不足跳过」直接陈述、不加「正常不是错误」注解。第零节定时任务 prompt 模板同步改写（原「汇报重点」清单含活动累计积分、成长计划等级等噪声项）。脚本逻辑与接口无变化。版本号由 3.2.0 升至 3.2.1（文档完善 = PATCH）。
 - **3.2.0（2026-11-09 成长中心 + 自动开盲盒）**：新增「成长中心」只读区块——连续登录档位与下一档缺口、7/14/28 分档兑换状态、补登卡余额、抽奖次数、能量余额与盲盒配额；`--json` 增加 `growth_center` 字段。新增 `--box-auto` 自动开盲盒（`POST /activity/growth/buddy/open`，body `{}`），开前先查 `quota.affordable`，为 0 时不发写请求，单次最多开 `max_open_count` 个。同时按服务端 `/activity/growth/streak` 实测校准 `STREAK_TIERS`（旧表 7 天档 +50 分/+3 能量、14 天档 +100/+4 均与页面不符，实际为 7 天档 0 分/+2 能量、14 天档 +50/+3），并把播报里原「连续登录」行改名为「签到活动累计」，避免与成长中心的真实连续天数混读。抽奖与分档兑换只读展示、不代操作（请求体必填字段未探明）。版本号由 3.1.7 升至 3.2.0（新增能力 = MINOR）。
 - **3.1.7（2026-09-22 镜像签到助手 3.1.7：三通道授权 B/C）**：参考签到助手 3.1.7，补齐「通道 B 一次性网页会话授权」与「通道 C 长效令牌自续期」两条授权链路，使积分助手在 macOS/Linux（本地登录态无法解密时）与「客户端长期不在线」场景下也能稳定取数、签到、跑旅行闭环。实现方式：镜像签到助手多脚本结构，新增 `scripts/web_auth.py`（通道 B，交互打开一次性授权页、生成 `WBAUTH1:` 授权码并落盘 `~/.workbuddy/checkin-cred.json`，POSIX 0600）、`scripts/rt_auth.py`（通道 C，落盘 `~/.workbuddy/checkin-rt.json`，每次运行用 `refresh_token` 换新 `accessToken` 并回写自转，客户端关闭仍可用）、`scripts/auto_checkin.py`（三通道探测与自动派发）、`scripts/push_message.py`（12 渠道推送，原样复用）、`templates/auth-snippet.js`（授权片段生成工具）；并把三条通道统一接入 `buddy_station.py` 的 `_resolve_auth(channel)`（通道 A 本机登录态 / B 网页会话 / C 长效令牌，默认 `auto` 自动择优）。新增 CLI：`--probe`（探测三通道可用性与推荐）、`--snippet` / `--setup-code` / `--setup-curl` / `--setup-har` / `--setup-file`（通道 B 授权）、`--export-rt` / `--setup-rt` / `--setup-rt-file` / `--forget-rt`（通道 C）、`--channel auto|local|web|rt`（强制指定通道）、`--forget`（清除通道 B 凭据）。文档同步补齐三通道说明、凭据文件位置与排错项。版本号由 3.1.4 升至 3.1.7（新增能力 = MINOR，与签到助手 3.1.7 对齐）。
 - **3.1.4（2026-09-24 跨平台密钥获取：macOS / Linux 签到支持）**：参考签到助手 3.3.1，为积分助手补齐非 Windows 平台的 `atRestSecretKey` 获取能力，使其在 macOS / Linux 上同样能完成签到与旅行闭环。新增：① 平台分发 `_list_workbuddy_pids`（Windows 走 Toolhelp32、macOS 走 libproc 按可执行路径匹配、Linux 走 ps）；② macOS 主途径「经客户端 Node 调试端口（CDP）让客户端自己交出密钥」（`--inspect` 独立实例 + WebSocket Runtime.evaluate，取得后落盘 `~/.workbuddy/scripts/atrest.key` 供自动化复用）；③ macOS Keychain 兜底、macOS 离线核心转储兜底（Hardened Runtime 下实测不可用，仅保留）；④ Linux `/proc/<pid>/mem` 在线扫描兜底；⑤ 按平台的 `_discover_at_rest_key` 编排（环境变量 → 密钥文件 → 客户端密钥文件扫描 → Keychain → 进程内存 / CDP）。Windows 既有路径（含已修正的 7 字段 `MEMORY_BASIC_INFORMATION` 进程内存扫描）完整保留。版本号由 3.1.2 升至 3.1.4（跨平台兼容，按用户明确要求升版）。
